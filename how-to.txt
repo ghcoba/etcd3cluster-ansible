@@ -1,0 +1,666 @@
+etcd 3.3 cluster (3 nodes) deployment using ansible
+
+
+
+revision 1: 
+   1. use the new etcd3cluster-ansible deply script version 
+         (changes: a. revise cer profile; b. add ntp auto deploy; c. add firewall port enable auto deploy)
+
+enviroment:
+   1. make a template vm (centos 7, minimal configuration) in vmware ws pro;
+   2. clone 3 vms from template vm for employment as etcd node, 
+   and then setup ip, hostname, hosts, etc.
+   3. vm spec: 1 core, 1 gbyte ram, 20 gbyte disk
+
+deployed features:
+   1. 3 nodes etcd cluster
+   2. with ca/tls support
+   3. with single ntp time sync source in cluster
+   4. firewall port configured
+
+notes: 
++. no proxy setting is needed. (if github download speed is not too slow. or, downloading timeout will 
+   cause deployment fail in etcd binary downloading. )
+   ( to use proxy, please set proxy enviroment in get_url module,
+        get_url:
+          environment:
+            https_proxy:http://porxy:port
+            http_proxy:http://proxy:port
+   )
++. do not use dos format file (make-etcd-cert.sh file, when scp from remote). will cause bash issue(can not found bash^M issue) and cause script abort 
+   ( return code 2 : file/dir not exist when running /etc/etcd/ssl/make-etcd-cert.sh on first node task)
++. must make cert request setting - server profile has "client auth", to prevent client/server auth error
+   when using grpc. (this issue has been corrected in new deploy script)
++. must set up ntp time sync in clust (master sync with public time server, locat node sync with master node)
+   (single node ntp time sync server has been auto deployed in new version of script)
++.
+ 
+--------------------------------------------------------------------------------
+
+nodes:
+
+   . ansible node:
+     192.168.126.100, node0 - ansible - use to install ansible for deployment
+
+   . etcd cluster nodes:
+     192.168.126.101, node1 - etcd cluster node1
+     192.168.126.102, node2 - etcd cluster node2
+     192.168.126.103, node3 - etcd cluster node3
+
+--------------------------------------------------------------------------------
+
+   rem: deployment script used in a fork of frognew's etcd3-ansible repository.
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+before deployment:
+
+0.0. set node hostname, ip address in all node vms
+
+0.1. change hosts file of each node, add:
+   --
+   192.168.126.100 node0
+
+   192.168.126.101 node1
+   192.168.126.102 node2
+   192.168.126.103 node3
+   ---
+----------------------------------------------------------------------------------------------------------------------------------------------------
+1. clone etcd 3.2 cluster deploy package 
+
+   .node0. - it is the site we use ansible to deploy etcd cluster. install ansible package first.
+
+   - in node0 - 
+
+   # mkdir /root/dl
+   # cd /root/dl
+
+   - clone our new deploy package (it is a fork of erichll's ansible-etcd3 script)
+   # git clone https://github.com/ghcoba/etcd3cluster-ansible.git
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+2. change inventory configuration as per our environment setting
+   
+   - in node 0 -
+
+   a. 
+   - change hosts file for our node list and node name setting
+   # nano /root/dl/etcd3cluster-ansible/inventories/dev/hosts  
+---
+node0 ansible_connection=local
+
+[etcd-nodes]
+node1
+node2
+node3
+
+[ntp-master-node]
+node1
+---
+
+   rem: 
+       1. ntp-master-node group if for cluster master ntp server. node (must contain only one node) in 
+          ntp-master-node group is the single time sync resouce (server) for all other nodes in cluster.
+       3. etcd-nodes group must contains total 3, 5 or 7 nodes.
+ 
+   b.    
+   - change host variables files (in inventories/dev/host_vars). 
+     change .yml file names according to names defined in inventories/dev/hosts file.
+(
+[root@node0 host_vars]# pwd
+/root/dl/etcd3cluster-ansible/inventories/dev/host_vars
+[root@node0 host_vars]# ls
+node0.yml  node1.yml  node2.yml  node3.yml
+[root@node0 host_vars]#
+)
+
+file contents as:
+(
+[root@node0 host_vars]# cat node0.yml
+---
+
+host_ip_address: "192.168.126.100"
+[root@node0 host_vars]# cat node1.yml
+---
+
+host_ip_address: "192.168.126.101"
+[root@node0 host_vars]# cat node2.yml
+---
+
+host_ip_address: "192.168.126.102"
+[root@node0 host_vars]# cat node3.yml
+---
+
+host_ip_address: "192.168.126.103"
+)
+
+   c. 
+   - group_vars/etcd-nodes.yml and ntp-master-node.yml need no changes
+   # ls 
+     etcd-nodes.yml  ntp-master-node.yml
+
+   # cat /root/dl/ansible-etcd3/inventories/dev/group_vars/etcd-nodes.yml
+(
+---
+etcd_data_dir: /var/lib/etcd
+
+# host_ip_address: "{{ ansible_default_ipv4.address }}"
+etcd_machine_address: "{{ host_ip_address }}"
+)
+   # cat ntp-master-node.yml
+(
+---
+
+# host_ip_address: "{{ ansible_default_ipv4.address }}"
+ntp_master_machine_address: "{{ host_ip_address }}"
+)   
+
+   d.
+   - change enviroment setting of proxy for etcd binary file downloading
+     - change file: ./deploy-etcd3.yml
+     ref:
+  
+     e.g., using proxy
+     ==
+     environment:
+       http_proxy: http://10.0.0.9:30080
+       https_proxy: http://10.0.0.9:30080
+     --
+     if not using proxy, comment above environment setting.
+  
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+3. deploy etcd3 using ansible
+
+  - in node0 -
+
+  # cd /root/dl/ansible-etcd3
+  
+  - START DEPLOY USING PLAYBOOK
+  ---------------------------------------------------------------
+  # ansible-playbook -v -i inventories/dev/hosts deploy-etcd3.yml
+
+    (where, option -v controls the output of debug information)
+
+  
+  (reboot nodes and test: # ansible tnodes -m command -a "reboot" )
+
+  - take a brief check
+  # ansible tnodes -m command -a "etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379 cluster-health"
+  (will dispaly cluster member information and health status)
+  
+----------------------------------------------------------------------------------------------------------------------------------------------------
+. end of deployment
+----------------------------------------------------------------------------------------------------------------------------------------------------
+
+  ... continue to take more checks
+
+4. check cluster state
+
+  - check in node
+  # etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379,https://192.168.126.102:2379,https://192.168.126.103:2379 cluster-health
+(
+member 5a5ea796c5c2b2b1 is healthy: got healthy result from https://192.168.126.101:2379
+member a24230cdd22181aa is healthy: got healthy result from https://192.168.126.103:2379
+member b25384dbd5979d79 is healthy: got healthy result from https://192.168.126.102:2379
+cluster is healthy
+)
+   - list member 
+   # etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379 member list
+(
+5a5ea796c5c2b2b1: name=node1 peerURLs=https://192.168.126.101:2380 clientURLs=https://192.168.126.101:2379 isLeader=true
+a24230cdd22181aa: name=node3 peerURLs=https://192.168.126.103:2380 clientURLs=https://192.168.126.103:2379 isLeader=false
+b25384dbd5979d79: name=node2 peerURLs=https://192.168.126.102:2380 clientURLs=https://192.168.126.102:2379 isLeader=false
+)
+
+   - use V3 api (grpc) to check
+   # ETCDCTL_API=3 etcdctl --cacert=/etc/etcd/ssl/ca.crt --cert=/etc/etcd/ssl/client.crt --key=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379  member list
+(
+5a5ea796c5c2b2b1, started, node1, https://192.168.126.101:2380, https://192.168.126.101:2379
+a24230cdd22181aa, started, node3, https://192.168.126.103:2380, https://192.168.126.103:2379
+b25384dbd5979d79, started, node2, https://192.168.126.102:2380, https://192.168.126.102:2379
+)
+   (rem: cluster-health not work - with prompt of command not exist)   
+
+   - using ansible to check
+   # ansible tnodes -m command -a "etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379 cluster-health"
+(
+192.168.126.102 | SUCCESS | rc=0 >>
+member 5a5ea796c5c2b2b1 is healthy: got healthy result from https://192.168.126.101:2379
+member a24230cdd22181aa is healthy: got healthy result from https://192.168.126.103:2379
+member b25384dbd5979d79 is healthy: got healthy result from https://192.168.126.102:2379
+cluster is healthy
+m
+192.168.126.101 | SUCCESS | rc=0 >>
+...
+
+cluster is healthy
+)
+   - list member
+   # ansible tnodes -m command -a "etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379 member list"
+(
+192.168.126.102 | SUCCESS | rc=0 >>
+5a5ea796c5c2b2b1: name=node1 peerURLs=https://192.168.126.101:2380 clientURLs=https://192.168.126.101:2379 isLeader=true
+a24230cdd22181aa: name=node3 peerURLs=https://192.168.126.103:2380 clientURLs=https://192.168.126.103:2379 isLeader=false
+b25384dbd5979d79: name=node2 peerURLs=https://192.168.126.102:2380 clientURLs=https://192.168.126.102:2379 isLeader=false
+
+192.168.126.101 | SUCCESS | rc=0 >>
+...
+)
+
+---------------------------------------------------------------------------------------------------------------------------------------------------- 
+5. check etcd store key-value access (use V3 GRPC API)
+   
+   - list member in debug mode
+   # ETCDCTL_API=3 etcdctl --debug  --cacert=/etc/etcd/ssl/ca.crt --cert=/etc/etcd/ssl/client.crt --key=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379  member list
+(
+ETCDCTL_CACERT=/etc/etcd/ssl/ca.crt
+ETCDCTL_CERT=/etc/etcd/ssl/client.crt
+ETCDCTL_COMMAND_TIMEOUT=5s
+ETCDCTL_DEBUG=true
+ETCDCTL_DIAL_TIMEOUT=2s
+ETCDCTL_DISCOVERY_SRV=
+ETCDCTL_ENDPOINTS=[https://192.168.126.101:2379]
+ETCDCTL_HEX=false
+ETCDCTL_INSECURE_DISCOVERY=true
+ETCDCTL_INSECURE_SKIP_TLS_VERIFY=false
+ETCDCTL_INSECURE_TRANSPORT=true
+ETCDCTL_KEEPALIVE_TIME=2s
+ETCDCTL_KEEPALIVE_TIMEOUT=6s
+ETCDCTL_KEY=/etc/etcd/ssl/client.key
+ETCDCTL_USER=
+ETCDCTL_WRITE_OUT=simple
+INFO: 2018/09/04 19:44:36 ccBalancerWrapper: updating state and picker called by balancer: IDLE, 0xc420083260
+INFO: 2018/09/04 19:44:36 dialing to target with scheme: ""
+INFO: 2018/09/04 19:44:36 could not get resolver for scheme: ""
+INFO: 2018/09/04 19:44:36 balancerWrapper: is pickfirst: false
+INFO: 2018/09/04 19:44:36 balancerWrapper: got update addr from Notify: [{192.168.126.101:2379 <nil>}]
+INFO: 2018/09/04 19:44:36 ccBalancerWrapper: new subconn: [{192.168.126.101:2379 0  <nil>}]
+INFO: 2018/09/04 19:44:36 balancerWrapper: handle subconn state change: 0xc42024b250, CONNECTING
+INFO: 2018/09/04 19:44:36 ccBalancerWrapper: updating state and picker called by balancer: CONNECTING, 0xc420083260
+INFO: 2018/09/04 19:44:36 balancerWrapper: handle subconn state change: 0xc42024b250, READY
+INFO: 2018/09/04 19:44:36 clientv3/balancer: pin "192.168.126.101:2379"
+INFO: 2018/09/04 19:44:36 ccBalancerWrapper: updating state and picker called by balancer: READY, 0xc420083260
+INFO: 2018/09/04 19:44:36 balancerWrapper: got update addr from Notify: [{192.168.126.101:2379 <nil>}]
+5a5ea796c5c2b2b1, started, node1, https://192.168.126.101:2380, https://192.168.126.101:2379
+a24230cdd22181aa, started, node3, https://192.168.126.103:2380, https://192.168.126.103:2379
+b25384dbd5979d79, started, node2, https://192.168.126.102:2380, https://192.168.126.102:2379
+)
+
+   -list member (no debug optiotn)
+   # ETCDCTL_API=3 etcdctl  --cacert=/etc/etcd/ssl/ca.crt --cert=/etc/etcd/ssl/client.crt --key=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379 member list
+(
+5a5ea796c5c2b2b1, started, node1, https://192.168.126.101:2380, https://192.168.126.101:2379
+a24230cdd22181aa, started, node3, https://192.168.126.103:2380, https://192.168.126.103:2379
+b25384dbd5979d79, started, node2, https://192.168.126.102:2380, https://192.168.126.102:2379
+)
+
+   - set a key-value
+   # # ETCDCTL_API=3 etcdctl put --cacert=/etc/etcd/ssl/ca.crt --cert=/etc/etcd/ssl/client.crt --key=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379 testkey "hello, world"
+(
+OK
+)
+   - get value of a key
+   # ETCDCTL_API=3 etcdctl get --cacert=/etc/etcd/ssl/ca.crt --cert=/etc/etcd/ssl/client.crt --key=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379 testkey
+(
+testkey
+hello, world
+)
+
+----------------------------------------------------------------------------------------------------------------------------------------------------   
+6. check etcd store key-value access (use REST API)  
+
+   - put a key-value pair to etcd store
+   # curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://127.0.0.1:2379/v2/keys/foo -XPUT -d value=bar
+   (curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://192.168.126.101:2379/v2/keys/foo -XPUT -d value=bar)
+simple way 
+(
+[root@node1 dl]# curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://127.0.0.1:2379/v2/keys/foo -XPUT -d value=bar
+{"action":"set","node":{"key":"/foo","value":"bar","modifiedIndex":11,"createdIndex":11}}
+)
+
+- verbose display
+   # curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://127.0.0.1:2379/v2/keys/foo -XPUT -d value=bar -v
+(
+[root@node1 etc]# curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://127.0.0.1:2379/v2/keys/foo -XPUT -d value=bar -v
+* About to connect() to 127.0.0.1 port 2379 (#0)
+*   Trying 127.0.0.1...
+* Connected to 127.0.0.1 (127.0.0.1) port 2379 (#0)
+* Initializing NSS with certpath: sql:/etc/pki/nssdb
+*   CAfile: /etc/etcd/ssl/ca.crt
+  CApath: none
+* NSS: client certificate from file
+*       subject: CN=192.168.126.101,OU=etcd cluster,O=autogenerated,L=the internet
+*       start date: Sep 02 23:34:00 2018 GMT
+*       expire date: Aug 30 23:34:00 2028 GMT
+*       common name: 192.168.126.101
+*       issuer: CN=etcd ansible autogen CA,OU=etcd cluster,O=autogenerated,L=the internet
+* SSL connection using TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+* Server certificate:
+*       subject: CN=192.168.126.101,OU=etcd cluster,O=autogenerated,L=the internet
+*       start date: Sep 02 23:34:00 2018 GMT
+*       expire date: Aug 30 23:34:00 2028 GMT
+*       common name: 192.168.126.101
+*       issuer: CN=etcd ansible autogen CA,OU=etcd cluster,O=autogenerated,L=the internet
+> PUT /v2/keys/foo HTTP/1.1
+> User-Agent: curl/7.29.0
+> Host: 127.0.0.1:2379
+> Accept: */*
+> Content-Length: 9
+> Content-Type: application/x-www-form-urlencoded
+>
+* upload completely sent off: 9 out of 9 bytes
+< HTTP/1.1 201 Created
+< Content-Type: application/json
+< X-Etcd-Cluster-Id: 5daa403ece01b0b5
+< X-Etcd-Index: 8
+< X-Raft-Index: 36
+< X-Raft-Term: 2
+< Date: Mon, 03 Sep 2018 00:02:00 GMT
+< Content-Length: 88
+<
+{"action":"set","node":{"key":"/foo","value":"bar","modifiedIndex":8,"createdIndex":8}}
+* Connection #0 to host 127.0.0.1 left intact
+[root@node1 etc]#
+) 
+
+   - get key's value
+   # curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://127.0.0.1:2379/v2/keys/foo
+   (# curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://192.168.126.101:2379/v2/keys/foo)
+(
+{"action":"get","node":{"key":"/foo","value":"bar","modifiedIndex":11,"createdIndex":11}}
+)
+
+    - get key's value in verbose mode
+    # curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://127.0.0.1:2379/v2/keys/foo -v
+(
+[root@node1 etc]# curl --cacert /etc/etcd/ssl/ca.crt --cert /etc/etcd/ssl/client.crt --key /etc/etcd/ssl/client.key https://127.0.0.1:2379/v2/keys/foo -v
+* About to connect() to 127.0.0.1 port 2379 (#0)
+*   Trying 127.0.0.1...
+* Connected to 127.0.0.1 (127.0.0.1) port 2379 (#0)
+* Initializing NSS with certpath: sql:/etc/pki/nssdb
+*   CAfile: /etc/etcd/ssl/ca.crt
+  CApath: none
+* NSS: client certificate from file
+*       subject: CN=192.168.126.101,OU=etcd cluster,O=autogenerated,L=the internet
+*       start date: Sep 02 23:34:00 2018 GMT
+*       expire date: Aug 30 23:34:00 2028 GMT
+*       common name: 192.168.126.101
+*       issuer: CN=etcd ansible autogen CA,OU=etcd cluster,O=autogenerated,L=the internet
+* SSL connection using TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+* Server certificate:
+*       subject: CN=192.168.126.101,OU=etcd cluster,O=autogenerated,L=the internet
+*       start date: Sep 02 23:34:00 2018 GMT
+*       expire date: Aug 30 23:34:00 2028 GMT
+*       common name: 192.168.126.101
+*       issuer: CN=etcd ansible autogen CA,OU=etcd cluster,O=autogenerated,L=the internet
+> GET /v2/keys/foo HTTP/1.1
+> User-Agent: curl/7.29.0
+> Host: 127.0.0.1:2379
+> Accept: */*
+>
+< HTTP/1.1 200 OK
+< Content-Type: application/json
+< X-Etcd-Cluster-Id: 5daa403ece01b0b5
+< X-Etcd-Index: 8
+< X-Raft-Index: 36
+< X-Raft-Term: 2
+< Date: Mon, 03 Sep 2018 00:13:52 GMT
+< Content-Length: 88
+<
+{"action":"get","node":{"key":"/foo","value":"bar","modifiedIndex":8,"createdIndex":8}}
+* Connection #0 to host 127.0.0.1 left intact
+[root@node1 etc]#
+)
+
+7. all system status record ( -> see bottom of this file)
+
+
+----------------------------------------------
+rem:
+   1. if key/value access from client without correct ca/cert setting, we can get error message in log (e.g., 
+      systemctl status -l etcd)
+      : Sep 04 03:55:42 node1 etcd[3605]: rejected connection from "192.168.126.101:34348" (error "remote error: tls: bad certificate", ServerName "")
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+. end of installtion check
+
+
+
+
+
+
+============================================================================================================
+
+--- check and misc. --------------
+
+- check version
+(
+[root@node0 ansible-etcd3]# ansible tnodes -m command -a "etcd --version"
+192.168.126.103 | SUCCESS | rc=0 >>
+etcd Version: 3.3.9
+Git SHA: fca8add78
+Go Version: go1.10.3
+Go OS/Arch: linux/amd64
+
+...
+)
+
+- check status
+# ansible tnodes -m command -a "etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379,https://192.168.126.102:2379,https://192.168.126.103:2379 cluster-health"
+(
+[root@node0 ansible-etcd3]# ansible tnodes -m command -a "etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379,https://192.168.126.102:2379,https://192.168.126.103:2379 cluster-health"
+192.168.126.102 | SUCCESS | rc=0 >>
+member 170ea57a51c818d0 is healthy: got healthy result from https://192.168.126.102:2379
+member bbc8333f570db463 is healthy: got healthy result from https://192.168.126.103:2379
+member e61dc3de93839f0d is healthy: got healthy result from https://192.168.126.101:2379
+cluster is healthy
+
+...
+
+[root@node0 ansible-etcd3]#
+)
+
+- check service status
+(
+[root@node0 ansible-etcd3]# ansible tnodes -m command -a "systemctl status etcd"
+192.168.126.102 | SUCCESS | rc=0 >>
+● etcd.service - etcd server
+   Loaded: loaded (/etc/systemd/system/etcd.service; enabled; vendor preset: disabled)
+   Active: active (running) since Mon 2018-09-03 04:27:56 CST; 8min ago
+ Main PID: 2967 (etcd)
+   CGroup: /system.slice/etcd.service
+           └─2967 /usr/local/bin/etcd
+
+Sep 03 04:28:03 node2 etcd[2967]: 170ea57a51c818d0 received MsgVoteResp from 170ea57a51c818d0 at term 286
+Sep 03 04:28:03 node2 etcd[2967]: 170ea57a51c818d0 [logterm: 285, index: 47] sent MsgVote request to bbc8333f570db463 at term 286
+Sep 03 04:28:03 node2 etcd[2967]: 170ea57a51c818d0 [logterm: 285, index: 47] sent MsgVote request to e61dc3de93839f0d at term 286
+Sep 03 04:28:03 node2 etcd[2967]: raft.node: 170ea57a51c818d0 lost leader e61dc3de93839f0d at term 286
+Sep 03 04:28:03 node2 etcd[2967]: 170ea57a51c818d0 received MsgVoteResp rejection from bbc8333f570db463 at term 286
+Sep 03 04:28:03 node2 etcd[2967]: 170ea57a51c818d0 [quorum:2] has received 1 MsgVoteResp votes and 1 vote rejections
+Sep 03 04:28:03 node2 etcd[2967]: 170ea57a51c818d0 received MsgVoteResp from e61dc3de93839f0d at term 286
+Sep 03 04:28:03 node2 etcd[2967]: 170ea57a51c818d0 [quorum:2] has received 2 MsgVoteResp votes and 1 vote rejections
+Sep 03 04:28:03 node2 etcd[2967]: 170ea57a51c818d0 became leader at term 286
+Sep 03 04:28:03 node2 etcd[2967]: raft.node: 170ea57a51c818d0 elected leader 170ea57a51c818d0 at term 286
+
+192.168.126.101 | SUCCESS | rc=0 >>
+● etcd.service - etcd server
+   Loaded: loaded (/etc/systemd/system/etcd.service; enabled; vendor preset: disabled)
+   Active: active (running) since Mon 2018-09-03 04:28:03 CST; 8min ago
+ Main PID: 3035 (etcd)
+   CGroup: /system.slice/etcd.service
+           └─3035 /usr/local/bin/etcd
+
+Sep 03 04:28:03 node1 etcd[3035]: published {Name:node1 ClientURLs:[https://192.168.126.101:2379]} to cluster 5daa403ece01b0b5
+Sep 03 04:28:03 node1 etcd[3035]: ready to serve client requests
+Sep 03 04:28:03 node1 etcd[3035]: ready to serve client requests
+Sep 03 04:28:03 node1 etcd[3035]: serving client requests on 192.168.126.101:2379
+Sep 03 04:28:03 node1 etcd[3035]: serving client requests on 127.0.0.1:2379
+Sep 03 04:28:03 node1 systemd[1]: Started etcd server.
+Sep 03 04:28:03 node1 etcd[3035]: rejected connection from "127.0.0.1:40010" (error "tls: failed to verify client's certificate: x509: certificate specifies an incompatible key usage", ServerName "")
+Sep 03 04:28:03 node1 etcd[3035]: rejected connection from "192.168.126.101:33526" (error "tls: failed to verify client's certificate: x509: certificate specifies an incompatible key usage", ServerName "")
+Sep 03 04:28:03 node1 etcd[3035]: WARNING: 2018/09/03 04:28:03 Failed to dial 192.168.126.101:2379: connection error: desc = "transport: authentication handshake failed: remote error: tls: bad certificate"; please retry.
+Sep 03 04:28:03 node1 etcd[3035]: WARNING: 2018/09/03 04:28:03 Failed to dial 127.0.0.1:2379: connection error: desc = "transport: authentication handshake failed: remote error: tls: bad certificate"; please retry.
+                                  <---------------------------------------------------------->
+192.168.126.103 | SUCCESS | rc=0 >>
+● etcd.service - etcd server
+   Loaded: loaded (/etc/systemd/system/etcd.service; enabled; vendor preset: disabled)
+   Active: active (running) since Mon 2018-09-03 04:27:56 CST; 8min ago
+ Main PID: 2960 (etcd)
+   CGroup: /system.slice/etcd.service
+           └─2960 /usr/local/bin/etcd
+
+Sep 03 04:28:03 node3 etcd[2960]: peer e61dc3de93839f0d became active
+Sep 03 04:28:03 node3 etcd[2960]: closed an existing TCP streaming connection with peer e61dc3de93839f0d (stream MsgApp v2 writer)
+Sep 03 04:28:03 node3 etcd[2960]: established a TCP streaming connection with peer e61dc3de93839f0d (stream MsgApp v2 writer)
+Sep 03 04:28:03 node3 etcd[2960]: closed an existing TCP streaming connection with peer e61dc3de93839f0d (stream Message writer)
+Sep 03 04:28:03 node3 etcd[2960]: established a TCP streaming connection with peer e61dc3de93839f0d (stream Message writer)
+Sep 03 04:28:03 node3 etcd[2960]: established a TCP streaming connection with peer e61dc3de93839f0d (stream MsgApp v2 reader)
+Sep 03 04:28:03 node3 etcd[2960]: established a TCP streaming connection with peer e61dc3de93839f0d (stream Message reader)
+Sep 03 04:28:03 node3 etcd[2960]: bbc8333f570db463 [logterm: 285, index: 47, vote: bbc8333f570db463] rejected MsgVote from 170ea57a51c818d0 [logterm: 285, index: 47] at term 286
+Sep 03 04:28:03 node3 etcd[2960]: bbc8333f570db463 became follower at term 286
+Sep 03 04:28:03 node3 etcd[2960]: raft.node: bbc8333f570db463 elected leader 170ea57a51c818d0 at term 286
+
+[root@node0 ansible-etcd3]#
+)
+
+---- . etcd 3.3.9 (and also 3.2.13) deployment with authentication error (127.0.0.1 - may cause grpc client/server key using).
+ 
+CHECK : rejected connection from "127.0.0.1:40010" (error "tls: failed to verify client's certificate: x509: certificate specifies an incompatible key usage", ServerName ""
+
+REF: peer can not dial to  server - becauser etcd server (grpc mode) need client auth, but original cert config file
+     not include "client auth" for server profile in cert gen script. 
+
+     TO FIX :we have change server profile in cert config to add "client auth". 
+            ( see above 2.b - change file : /root/dl/ansible-etcd3/roles/etcd3/files/make-ca-cert.sh)
+
+---
+correct: etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379,https://192.168.126.102:2379,https://192.168.126.103:2379 cluster-health
+error:   etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/server.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379,https://192.168.126.102:2379,https://192.168.126.103:2379 cluster-health
+
+---
+rem : down-grade from 3.3 to 3.2 will fail, as data store version can not down-grade
+related -
+data - /var/lib/etcd
+bin - /usr/local/bin
+config - /etc/etcd - etcd.conf, ssl dir
+service - /etc/systemd/system/etcd.service
+(some file/directory are own by etcd user, and can not delete using ansible root user right)
+
+- to delete delployed etcd
+(
+[root@node3 ~]# systemctl stop etcd
+[root@node3 ~]# systemctl disable etcd
+Removed symlink /etc/systemd/system/multi-user.target.wants/etcd.service.
+[root@node3 ~]# rm -rf /usr/local/bin/*
+[root@node3 ~]# ls /usr/local/bin
+[root@node3 ~]# rm -rf /etc/etcd
+[root@node3 ~]# rm -f /etc/systemd/system/etcd.service
+[root@node3 ~]# rm -rf /var/lib/etcd                     # -- data store (include version) of etcd
+) 
+
+- delete above directory/contens, and re-deploy 3.2.13 will work.
+
+------------------------------------------------------------------------------------------------------
+machine state record:
+
+(
+# ansible tnodes -m command -a "systemctl status -l etcd"
+192.168.126.103 | SUCCESS | rc=0 >>
+● etcd.service - etcd server
+   Loaded: loaded (/etc/systemd/system/etcd.service; enabled; vendor preset: disabled)
+   Active: active (running) since Tue 2018-09-04 19:19:33 CST; 1h 10min ago
+ Main PID: 22262 (etcd)
+   CGroup: /system.slice/etcd.service
+           └─22262 /usr/local/bin/etcd
+
+Sep 04 19:19:33 node3 etcd[22262]: published {Name:node3 ClientURLs:[https://192.168.126.103:2379]} to cluster 9f7e095a4d161593
+Sep 04 19:19:33 node3 etcd[22262]: ready to serve client requests
+Sep 04 19:19:33 node3 etcd[22262]: ready to serve client requests
+Sep 04 19:19:33 node3 etcd[22262]: serving client requests on 127.0.0.1:2379
+Sep 04 19:19:33 node3 etcd[22262]: serving client requests on 192.168.126.103:2379
+Sep 04 19:19:33 node3 etcd[22262]: established a TCP streaming connection with peer b25384dbd5979d79 (stream Message reader)
+Sep 04 19:19:33 node3 systemd[1]: Started etcd server.
+Sep 04 19:19:33 node3 etcd[22262]: established a TCP streaming connection with peer b25384dbd5979d79 (stream Message writer)
+Sep 04 19:19:33 node3 etcd[22262]: established a TCP streaming connection with peer b25384dbd5979d79 (stream MsgApp v2 writer)
+Sep 04 19:19:33 node3 etcd[22262]: a24230cdd22181aa initialzed peer connection; fast-forwarding 8 ticks (election ticks 10) with 2 active peer(s)
+
+192.168.126.101 | SUCCESS | rc=0 >>
+● etcd.service - etcd server
+   Loaded: loaded (/etc/systemd/system/etcd.service; enabled; vendor preset: disabled)
+   Active: active (running) since Tue 2018-09-04 19:01:22 CST; 1h 28min ago
+ Main PID: 17483 (etcd)
+   CGroup: /system.slice/etcd.service
+           └─17483 /usr/local/bin/etcd
+
+Sep 04 19:19:31 node1 etcd[17483]: failed to dial a24230cdd22181aa on stream MsgApp v2 (read tcp 192.168.126.101:43398->192.168.126.103:2380: read: connection reset by peer)
+Sep 04 19:19:31 node1 etcd[17483]: peer a24230cdd22181aa became inactive
+Sep 04 19:19:32 node1 etcd[17483]: lost the TCP streaming connection with peer a24230cdd22181aa (stream Message writer)
+Sep 04 19:19:33 node1 etcd[17483]: peer a24230cdd22181aa became active
+Sep 04 19:19:33 node1 etcd[17483]: established a TCP streaming connection with peer a24230cdd22181aa (stream MsgApp v2 reader)
+Sep 04 19:19:33 node1 etcd[17483]: established a TCP streaming connection with peer a24230cdd22181aa (stream Message reader)
+Sep 04 19:19:33 node1 etcd[17483]: closed an existing TCP streaming connection with peer a24230cdd22181aa (stream MsgApp v2 writer)
+Sep 04 19:19:33 node1 etcd[17483]: established a TCP streaming connection with peer a24230cdd22181aa (stream MsgApp v2 writer)
+Sep 04 19:19:33 node1 etcd[17483]: established a TCP streaming connection with peer a24230cdd22181aa (stream Message writer)
+Sep 04 19:41:13 node1 etcd[17483]: rejected connection from "192.168.126.101:41754" (error "EOF", ServerName "")
+
+192.168.126.102 | SUCCESS | rc=0 >>
+● etcd.service - etcd server
+   Loaded: loaded (/etc/systemd/system/etcd.service; enabled; vendor preset: disabled)
+   Active: active (running) since Tue 2018-09-04 19:06:20 CST; 1h 23min ago
+ Main PID: 12930 (etcd)
+   CGroup: /system.slice/etcd.service
+           └─12930 /usr/local/bin/etcd
+
+Sep 04 19:19:31 node2 etcd[12930]: lost the TCP streaming connection with peer a24230cdd22181aa (stream Message reader)
+Sep 04 19:19:31 node2 etcd[12930]: failed to dial a24230cdd22181aa on stream MsgApp v2 (EOF)
+Sep 04 19:19:31 node2 etcd[12930]: peer a24230cdd22181aa became inactive
+Sep 04 19:19:33 node2 etcd[12930]: peer a24230cdd22181aa became active
+Sep 04 19:19:33 node2 etcd[12930]: closed an existing TCP streaming connection with peer a24230cdd22181aa (stream MsgApp v2 writer)
+Sep 04 19:19:33 node2 etcd[12930]: established a TCP streaming connection with peer a24230cdd22181aa (stream MsgApp v2 writer)
+Sep 04 19:19:33 node2 etcd[12930]: closed an existing TCP streaming connection with peer a24230cdd22181aa (stream Message writer)
+Sep 04 19:19:33 node2 etcd[12930]: established a TCP streaming connection with peer a24230cdd22181aa (stream Message writer)
+Sep 04 19:19:33 node2 etcd[12930]: established a TCP streaming connection with peer a24230cdd22181aa (stream Message reader)
+Sep 04 19:19:33 node2 etcd[12930]: established a TCP streaming connection with peer a24230cdd22181aa (stream MsgApp v2 reader)
+)
+
+(
+[root@node0 ansible-etcd3]# ansible tnodes -m command -a "etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379,https://192.168.126.102:2379,https://192.168.126.103:2379 cluster-health"
+192.168.126.103 | SUCCESS | rc=0 >>
+member 5a5ea796c5c2b2b1 is healthy: got healthy result from https://192.168.126.101:2379
+member a24230cdd22181aa is healthy: got healthy result from https://192.168.126.103:2379
+member b25384dbd5979d79 is healthy: got healthy result from https://192.168.126.102:2379
+cluster is healthy
+
+192.168.126.102 | SUCCESS | rc=0 >>
+member 5a5ea796c5c2b2b1 is healthy: got healthy result from https://192.168.126.101:2379
+member a24230cdd22181aa is healthy: got healthy result from https://192.168.126.103:2379
+member b25384dbd5979d79 is healthy: got healthy result from https://192.168.126.102:2379
+cluster is healthy
+
+192.168.126.101 | SUCCESS | rc=0 >>
+member 5a5ea796c5c2b2b1 is healthy: got healthy result from https://192.168.126.101:2379
+member a24230cdd22181aa is healthy: got healthy result from https://192.168.126.103:2379
+member b25384dbd5979d79 is healthy: got healthy result from https://192.168.126.102:2379
+cluster is healthy
+)
+
+(
+[root@node0 ansible-etcd3]# ansible tnodes -m command -a "etcdctl --ca-file=/etc/etcd/ssl/ca.crt --cert-file=/etc/etcd/ssl/client.crt --key-file=/etc/etcd/ssl/client.key --endpoints=https://192.168.126.101:2379,https://192.168.126.102:2379,https://192.168.126.103:2379 member list"
+192.168.126.102 | SUCCESS | rc=0 >>
+5a5ea796c5c2b2b1: name=node1 peerURLs=https://192.168.126.101:2380 clientURLs=https://192.168.126.101:2379 isLeader=true
+a24230cdd22181aa: name=node3 peerURLs=https://192.168.126.103:2380 clientURLs=https://192.168.126.103:2379 isLeader=false
+b25384dbd5979d79: name=node2 peerURLs=https://192.168.126.102:2380 clientURLs=https://192.168.126.102:2379 isLeader=false
+
+192.168.126.103 | SUCCESS | rc=0 >>
+5a5ea796c5c2b2b1: name=node1 peerURLs=https://192.168.126.101:2380 clientURLs=https://192.168.126.101:2379 isLeader=true
+a24230cdd22181aa: name=node3 peerURLs=https://192.168.126.103:2380 clientURLs=https://192.168.126.103:2379 isLeader=false
+b25384dbd5979d79: name=node2 peerURLs=https://192.168.126.102:2380 clientURLs=https://192.168.126.102:2379 isLeader=false
+
+192.168.126.101 | SUCCESS | rc=0 >>
+5a5ea796c5c2b2b1: name=node1 peerURLs=https://192.168.126.101:2380 clientURLs=https://192.168.126.101:2379 isLeader=true
+a24230cdd22181aa: name=node3 peerURLs=https://192.168.126.103:2380 clientURLs=https://192.168.126.103:2379 isLeader=false
+b25384dbd5979d79: name=node2 peerURLs=https://192.168.126.102:2380 clientURLs=https://192.168.126.102:2379 isLeader=false
+)
+
+

@@ -1,0 +1,5 @@
+tmp/
+tmp/etcd3/
+tmp/etcd_certs_backup/
+/deploy-etcd3.retry
+

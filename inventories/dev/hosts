@@ -1,0 +1,9 @@
+node0 ansible_connection=local
+
+[etcd-nodes]
+node1
+node2
+node3
+
+[ntp-master-node]
+node1
